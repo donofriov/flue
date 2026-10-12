@@ -5,6 +5,7 @@
 ### Fixes & Other Changes
 
 - **`useAgentFinish` callbacks once again see state written during the response.** Since 2.2.0, finish hooks ran against the agent render from before the response's final turn, so a durable guard set by a finish callback — the documented `usePersistentState` pattern for appending a reminder once — was never observed: the callback re-appended on every cycle until the response failed at the runaway-loop ceiling. The agent now re-renders before each finish-hook cycle.
+- **A graceful shutdown while a tool batch is running no longer fails the submission on recovery with `This operation was aborted`.** The abort ends the batch, and the agent loop then starts the next turn with the signal already fired. pi's request setup threw the abort before any provider call and recorded that turn as `stopReason: "error"` instead of `"aborted"`, so recovery classified it as a terminal error and settled the submission `failed`. A model response that errors after its request signal fired is now recorded as aborted, so recovery resumes the turn. A user abort still settles `aborted`.
 
 ## 2.2.2 - 2026-09-28
 

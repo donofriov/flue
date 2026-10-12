@@ -17,6 +17,7 @@ import type {
 import { Agent } from '@earendil-works/pi-agent-core';
 import type {
 	AssistantMessage,
+	AssistantMessageEvent,
 	ImageContent,
 	Message,
 	Model,
@@ -627,10 +628,24 @@ function getRegisteredPackagedSkills(
 	return registered;
 }
 
-function wrapProviderStream<T extends AsyncIterable<unknown> & { result(): Promise<unknown> }>(
+/**
+ * An error response after the request's signal fired is the abort, as pi's
+ * providers record it. pi's lazy request setup (auth resolution, provider
+ * loading) reports every failure as `error`, including that abort.
+ */
+function normalizeAbortedResponse(message: AssistantMessage, signal: AbortSignal | undefined) {
+	return message.stopReason === 'error' && signal?.aborted
+		? { ...message, stopReason: 'aborted' as const }
+		: message;
+}
+
+function wrapProviderStream<
+	T extends AsyncIterable<AssistantMessageEvent> & { result(): Promise<AssistantMessage> },
+>(
 	stream: T,
 	operation: { type: 'model'; turnId: string },
 	executionContext: FlueExecutionContext,
+	signal: AbortSignal | undefined,
 ): T {
 	return {
 		[Symbol.asyncIterator]() {
@@ -638,7 +653,13 @@ function wrapProviderStream<T extends AsyncIterable<unknown> & { result(): Promi
 			const returnIterator = iterator.return?.bind(iterator);
 			const throwIterator = iterator.throw?.bind(iterator);
 			return {
-				next: () => interceptExecution(operation, executionContext, () => iterator.next()),
+				next: async () => {
+					const next = await interceptExecution(operation, executionContext, () => iterator.next());
+					if (next.done || next.value.type !== 'error') return next;
+					const error = normalizeAbortedResponse(next.value.error, signal);
+					if (error === next.value.error) return next;
+					return { done: false, value: { type: 'error', reason: 'aborted', error } };
+				},
 				return: returnIterator
 					? () => interceptExecution(operation, executionContext, returnIterator)
 					: undefined,
@@ -648,8 +669,9 @@ function wrapProviderStream<T extends AsyncIterable<unknown> & { result(): Promi
 					: undefined,
 			};
 		},
-		result() {
-			return interceptExecution(operation, executionContext, () => stream.result());
+		async result() {
+			const message = await interceptExecution(operation, executionContext, () => stream.result());
+			return normalizeAbortedResponse(message, signal);
 		},
 	} as T;
 }
@@ -868,6 +890,7 @@ export class Session implements FlueSession, AgentSubmissionSession {
 				getRuntimeModels().streamSimple(model, context, options),
 				operation,
 				executionContext,
+				options?.signal,
 			),
 		);
 	};
